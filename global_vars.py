@@ -1,150 +1,120 @@
-import cnn
+import netket as nk
 import numpy as np
-import sys
 import jax.numpy as jnp
-import math
-import os
-from itertools import product, permutations
-from netket.graph import Lattice
-from matplotlib import pyplot as plt
 
 L = None
 
+
 def coor2in(x, y, L):
-    return int(((x+L)%L)*(L) + (y+(L))%(L))
-
-def in2coor(i,L):
-    y = i % L
-    x = (i-y) // L 
-    return [x, y]
-
-def inverse(perm):
-    inv = [0] * len(perm)
-    for i, p in enumerate(perm):
-        inv[p] = i
-    return jnp.array(inv)
-
-def compose(p1, p2):
-    """Return composition of two permutations: p1 ◦ p2"""
-    return jnp.array([p2[i] for i in p1])
-
-def construct_product_table(G):
-    """Construct table A(i, j) such that G[A[i][j]] =  G[i]^{-1}*G[j]"""
-    n = len(G)
-    A = [[-1 for _ in range(n)] for _ in range(n)]
-
-    for i in range(n):
-        g_inv = inverse(G[i])
-        for j in range(n):
-            target = compose(g_inv, G[j])
-            for k in range(n):
-                if np.array_equal(G[k], target):
-                    A[i][j] = k
-                    break
-    return jnp.array(A)
+    return int(((x + L) % L) * L + ((y + L) % L))
 
 
-def generate_mask(N_cell, ker_size, L):
-
+def generate_mask(n_cell, ker_size, L):
     n_elms = ker_size**2
-    ker = np.full((N_cell, N_cell), n_elms)
-    
+    ker = np.full((n_cell, n_cell), n_elms)
+
     n = 0
-    for del_i, del_j in product(range(ker_size), range(ker_size)):
-        for i, j in product(range(L), range(L)):
-            c1 = coor2in(i, j, L)
-            i2, j2 = i + del_i, j + del_j
-            c2 = coor2in(i2, j2, L)
-
-            ker[c1, c2] = n
-
-        n += 1
+    for del_i in range(ker_size):
+        for del_j in range(ker_size):
+            for i in range(L):
+                for j in range(L):
+                    c1 = coor2in(i, j, L)
+                    c2 = coor2in(i + del_i, j + del_j, L)
+                    ker[c1, c2] = n
+            n += 1
 
     return jnp.array(ker)
 
+
+def _subgroup_table(parent_table, subgroup_parent_indices):
+    parent_to_sub = {parent_idx: sub_idx for sub_idx, parent_idx in enumerate(subgroup_parent_indices)}
+    subgroup_table = np.vectorize(parent_to_sub.get)(parent_table[np.ix_(subgroup_parent_indices, subgroup_parent_indices)])
+    return jnp.array(subgroup_table)
+
+
 def update_globals():
-    global N_plaquette, N, sstart, kernel2, kernel3, permutation, translation_site, translation_cell, inverse_permutation
-    global kernel2, kernel3, symmetries, point_group, inverse_translation, graph, product_table, point_group_table
-    global kx, ky, triangle_list
+    global N_plaquette, N
+    global graph, basis_vectors, site_offsets, site_positions, reciprocal_basis
+    global translation_group, translation_site, translation_table, translation_cell
+    global translation_even_site, translation_odd_site
+    global point_group_obj, point_group, point_group_labels, point_group_indices, point_group_table
+    global full_group, full_group_array, symmetries
+    global little_group_obj, little_group, little_group_labels, little_group_readable_labels
+    global little_group_indices, little_group_parent_indices, little_group_table
+    global kM, kx, ky, sstart, sstart_a1, kernel2, kernel3, form_factor_M
+    global translation_a1_idx, translation_a2_idx
 
-    if L is not None:
+    if L is None:
+        return
 
-        sqrt3 = np.sqrt(3.0)
-        basis = np.array([[1.0, 0.0], [0.5, sqrt3 / 2.0],])
-        cell = np.array([basis[0] / 2.0, basis[1] / 2.0, (basis[0]+basis[1])/2.0])
-        dimensions = [L, L]
-        graph = Lattice(basis_vectors=basis, site_offsets=cell, extent=dimensions, pbc=True)
-        # graph.draw()
-        # plt.show()
+    graph = nk.graph.Kagome([L, L], pbc=True)
 
-        N_plaquette = L**2
-        N = graph.n_nodes
+    N_plaquette = L**2
+    N = graph.n_nodes
 
-        symmetries = graph.automorphisms()
-        print(len(symmetries))
+    basis_vectors = np.array(graph.basis_vectors)
+    site_offsets = np.array(graph.site_offsets)
+    site_positions = jnp.array(np.array(graph.positions))
 
-        permutation = symmetries.to_array()
-        target = np.array([2, 3, 4, 5, 6, 3*L, 3*L+1, 3*L+2, 3*L+3, 3*L+4, 3*L+5, 6*L+1])
-        # target = np.array([3, 5, 7, 8, 9, 10])
-        mask = np.apply_along_axis(lambda row: np.array_equal(np.sort(row[target]), target), axis=1, arr=permutation)
-        point_group = jnp.array(permutation[mask])
-        
-        translation_site = jnp.array(graph.translation_group().to_array())
-        translation_cell = jnp.array([ s[3*j].item() // 3 for s in translation_site for j in range(N_plaquette) ]).reshape(N_plaquette, N_plaquette)
+    reciprocal_basis = 2 * np.pi * np.linalg.inv(basis_vectors).T
+    kM = np.array([np.pi, np.pi / np.sqrt(3.0)])
 
-        print("point group: ", len(point_group)," translation_group: ",len(translation_site))
+    translation_group = graph.translation_group()
+    translation_site = jnp.array(translation_group.to_array())
+    translation_table = jnp.array(translation_group.product_table)
+    translation_cell = jnp.array(
+        [[perm[3 * j].item() // 3 for j in range(N_plaquette)] for perm in translation_site]
+    )
 
-        # point_group_table = construct_product_table(point_group)
-        # translation_group_table = construct_product_table(translation_cell)
-        
-        permutation = jnp.array([compose(translation_site[j], point_group[i]) for j in range(N_plaquette) for i in range(len(point_group)) ])
-        # inverse_permutation = jnp.array([inverse(s) for s in permutation])
-        # inverse_translation = jnp.array([inverse(s) for s in translation_site])
-        # print(inverse_permutation.shape)
+    point_group_obj = graph.point_group()
+    point_group = jnp.array(point_group_obj.to_array())
+    point_group_labels = [repr(elem) for elem in point_group_obj.elems]
+    point_group_indices = {label: i for i, label in enumerate(point_group_labels)}
+    point_group_table = jnp.array(point_group_obj.product_table)
 
+    full_group = graph.space_group()
+    full_group_array = jnp.array(full_group.to_array())
+    symmetries = full_group
 
-        # if not os.path.exists(f"product_table_L{L}.npy"):
+    little_group_obj = full_group.little_group(*kM)
+    little_group_readable_labels = [repr(elem) for elem in little_group_obj.elems]
+    little_group_parent_indices = [point_group_indices[label] for label in little_group_readable_labels]
+    little_group = point_group[jnp.array(little_group_parent_indices)]
+    little_group_labels = ["e", "R3", "tauR", "Rtau"]
+    little_group_indices = {label: i for i, label in enumerate(little_group_labels)}
+    little_group_table = _subgroup_table(np.array(point_group_table), little_group_parent_indices)
 
-        #     A = np.zeros((len(symmetries), len(symmetries)), int)
-        #     for it, jt in product(range(N_plaquette), range(N_plaquette)):    
-        #         k = translation_group_table[it, jt]
-                
-        #         for ip, jp in product(range(len(point_group)), range(len(point_group))):
-        #             index = [ip + it * len(point_group), jp + jt * len(point_group)]
-                    
-        #             T = compose(inverse(point_group[ip]), compose(translation_site[k], point_group[ip]))
-        #             translated_index = T.tolist().index(0) // 3
-        #             A[index[0], index[1]] = int(point_group_table[ip, jp] + translated_index * len(point_group))
+    translation_a1_idx, translation_a2_idx = None, None
+    for idx in range(len(translation_site)):
+        translated_cell = int(translation_cell[idx, 0])
+        if translated_cell == coor2in(1, 0, L):
+            translation_a1_idx = idx
+        elif translated_cell == coor2in(0, 1, L):
+            translation_a2_idx = idx
 
-        #     np.save(f"product_table_L{L}.npy", A.astype(int))
-        #     A = jnp.array(A).astype(int)
-        #     exit()
+    translation_x = np.array(translation_cell[:, 0]) // L
+    translation_even_site = translation_site[jnp.array(np.where(translation_x % 2 == 0)[0])]
+    translation_odd_site = translation_site[jnp.array(np.where(translation_x % 2 == 1)[0])]
 
-        # else:
-        #     A = np.load(f"product_table_L{L}.npy")
-        
-        # product_table = jnp.array([ [A[A[i, 0], A[j, 0]] for j in range(len(symmetries)) ] for i in range(len(symmetries)) ])
-        sstart = np.zeros((N, ), dtype = int)
-        
-        n = 0
-        for i, j in product(range(L), range(L)):
-            sstart[3*n + 1], sstart[3*n + 2] = 1, -1
-            sstart[3*n + 0] = 1 if i % 2 == 0 else -1
-
+    sstart = np.zeros((N,), dtype=int)
+    n = 0
+    for i in range(L):
+        for j in range(L):
+            sstart[3 * n + 1], sstart[3 * n + 2] = 1, -1
+            sstart[3 * n + 0] = 1 if i % 2 == 0 else -1
             n += 1
+    sstart = jnp.array(sstart)
+    sstart_a1 = sstart[translation_site[translation_a1_idx]]
 
-        sstart = jnp.array(sstart)
+    kernel2 = generate_mask(N_plaquette, L // 2, L)
+    kernel3 = generate_mask(N_plaquette, L, L)
 
-        kernel2 = generate_mask(N_plaquette, L//2, L)
-        kernel3 = generate_mask(N_plaquette, L, L)
+    kx, ky = [], []
+    for i in range(L):
+        for j in range(L):
+            for offset in site_offsets:
+                kx.append(np.exp(2j * np.pi * (i + offset[0]) / L))
+                ky.append(np.exp(2j * np.pi * (j + offset[1]) / L))
+    kx, ky = jnp.array(kx), jnp.array(ky)
 
-        kx, ky = [], []
-        for i, j in product(range(L), range(L)):
-            kx.extend([np.exp(2j*np.pi*(i+cell[0, 0])/L),  np.exp(2j*np.pi*(i+cell[1, 0])/L), np.exp(2j*np.pi*(i+cell[2, 0])/L)])
-            ky.extend([np.exp(2j*np.pi*(j+cell[0, 1])/L),  np.exp(2j*np.pi*(j+cell[1, 1])/L), np.exp(2j*np.pi*(j+cell[2, 1])/L)])
-
-        kx, ky = jnp.array(kx), jnp.array(ky)
-
-        triangle_list = [[3*coor2in(i,j,L), 3*coor2in(i,j,L)+1, 3*coor2in(i,j,L)+2] for i in range(L) for j in range(L)]
-        triangle_list.extend([[3*coor2in(i,j,L), 3*coor2in(i,j-1,L)+2, 3*coor2in(i+1,j-1,L)+1] for i in range(L) for j in range(L)])
-        triangle_list = jnp.array(triangle_list).astype(int)
+    form_factor_M = jnp.exp(1j * (site_positions @ jnp.array(kM)))
