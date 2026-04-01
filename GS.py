@@ -118,6 +118,9 @@ def main():
     #model = utils.CNN_exchange(n_features = args.n_features, Jastrow = True, deep_CNN = False)
     #### Vanilla complex-RBM wavefunction
     model = nk.models.RBM(alpha = 16, dtype = complex)
+    #### Vanilla CNN (GCNN with only translational symmetry)
+    model = nk.models.GCNN(symmetries=g.translation_group, layers = 4, features=(6,) * 4, parity = 1,
+                param_dtype = complex, characters=g.symmetries.character_table()[0])(x)
     vstate = nk.vqs.MCState(sampler, model = model, n_samples=2**13, chunk_size=2**14, n_discard_per_chain=10)
     # param_map = get_scalar_indices_by_top_key(vstate.parameters)
     
