@@ -115,15 +115,19 @@ def main():
     exchange_rule = nk.sampler.rules.ExchangeRule(clusters = g.graph.edges())
     sampler = nk.sampler.MetropolisSampler(hi, exchange_rule, sweep_size = g.N // 5, n_chains=2**8, reset_chains = False)
     
-    model = utils.CNN_exchange(n_features = args.n_features, Jastrow = True, deep_CNN = False)
+    #model = utils.CNN_exchange(n_features = args.n_features, Jastrow = True, deep_CNN = False)
+    #### Vanilla complex-RBM wavefunction
+    model = nk.models.RBM(alpha = 16, dtype = complex)
     vstate = nk.vqs.MCState(sampler, model = model, n_samples=2**13, chunk_size=2**14, n_discard_per_chain=10)
     # param_map = get_scalar_indices_by_top_key(vstate.parameters)
     
     print(vstate.n_parameters)
     E = utils.evolve2(vstate, ha, 200, 2, 1e-6, show_progress=True) 
 
+    return()
     Jastrow_params = flax.core.copy(vstate.parameters["Jastrow_exchange_0"])
     model = utils.CNN_exchange(n_features = args.n_features)
+    
     vstate = nk.vqs.MCState(sampler, model = model, n_samples=2**12, chunk_size=2**14, n_discard_per_chain=10)
     params = flax.core.unfreeze(vstate.parameters)
     params["Jastrow_exchange_0"] = Jastrow_params
